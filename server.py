@@ -17,8 +17,10 @@ class APIError(Exception):
     def __init__(self,status,message,**extra):self.status=status;self.payload={'error':message,**extra}
 
 class Store:
-    def __init__(self,path,clock=time.time):
+    def __init__(self,path,clock=time.time,test_phone=None):
         self.path=str(path);self.clock=clock
+        if test_phone is not None and (not isinstance(test_phone,str) or not re.fullmatch(r'1[0-9]{10}',test_phone)):raise ValueError('Invalid local test phone')
+        self.test_phone=test_phone
         Path(path).parent.mkdir(parents=True,exist_ok=True)
         with self.db() as c:
             c.executescript('''
@@ -66,12 +68,14 @@ class Store:
         result={'expiresIn':300,'retryAfter':60,'mode':'local' if development else 'sms'}
         if development:result['developmentCode']=code
         return result
-    def verify(self,phone,code):
+    def verify(self,phone,code,allow_test_login=False):
         now=self.clock();error=None;result=None
+        test_login=allow_test_login and self.test_phone is not None and phone==self.test_phone
+        if test_login and (not isinstance(code,str) or not code.strip()):raise APIError(400,'测试账号也请填写一个验证码，例如 123456。')
         with self.db() as c:
             row=c.execute('SELECT * FROM codes WHERE phone=?',(phone,)).fetchone()
-            if not row or row['expires']<=now or row['attempts']>=5:error=APIError(400,'验证码已失效，请重新获取。')
-            elif not hmac.compare_digest(row['hash'],hashlib.sha256(str(code).encode()).hexdigest()):
+            if not test_login and (not row or row['expires']<=now or row['attempts']>=5):error=APIError(400,'验证码已失效，请重新获取。')
+            elif not test_login and not hmac.compare_digest(row['hash'],hashlib.sha256(str(code).encode()).hexdigest()):
                 c.execute('UPDATE codes SET attempts=attempts+1 WHERE phone=?',(phone,));error=APIError(400,'验证码不正确。')
             else:
                 c.execute('DELETE FROM codes WHERE phone=?',(phone,))
@@ -256,7 +260,8 @@ class Handler(SimpleHTTPRequestHandler):
             if path=='/api/config' and method=='GET':result={'mode':'local','providers':[{'id':k,'name':v['name'],'configured':False} for k,v in AUTH_PROVIDERS.items()]}
             elif path=='/api/auth/code' and method=='POST':s.rate('sms:'+self.client_address[0],20,3600);result=s.request_code(b.get('phone',''))
             elif path=='/api/auth/verify' and method=='POST':
-                s.rate('verify:'+self.client_address[0],60,3600);uid,token=s.verify(b.get('phone',''),b.get('code',''));result={'user':s.account(uid)};set_cookie='pefrien_session='+token+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000'
+                local_test=self.server.server_address[0] in ('127.0.0.1','::1') and self.client_address[0] in ('127.0.0.1','::1')
+                s.rate('verify:'+self.client_address[0],60,3600);uid,token=s.verify(b.get('phone',''),b.get('code',''),allow_test_login=local_test);result={'user':s.account(uid)};set_cookie='pefrien_session='+token+'; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000'
             elif path=='/api/auth/oauth/start' and method=='POST':raise APIError(503,'尚未配置此平台的正式应用。请先用手机号本地验证码体验。')
             elif path=='/api/auth/logout' and method=='POST':s.logout(token);result={'ok':True};set_cookie='pefrien_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'
             elif path=='/api/me' and method=='GET':result={'user':s.account(uid) if uid else None}
@@ -297,7 +302,9 @@ def serve(port=8767,data=None):
     runtime=Path(data or ROOT/'.runtime');runtime.mkdir(parents=True,exist_ok=True)
     keyfile=runtime/'ops-key.txt'
     if not keyfile.exists():keyfile.write_text(secrets.token_urlsafe(32),encoding='utf8')
-    server=ThreadingHTTPServer(('127.0.0.1',port),Handler);server.store=Store(runtime/'pefrien.sqlite3');server.ops_key=keyfile.read_text(encoding='utf8').strip()
+    configfile=runtime/'local-auth.json'
+    config=json.loads(configfile.read_text(encoding='utf8')) if configfile.exists() else {}
+    server=ThreadingHTTPServer(('127.0.0.1',port),Handler);server.store=Store(runtime/'pefrien.sqlite3',test_phone=config.get('testPhone'));server.ops_key=keyfile.read_text(encoding='utf8').strip()
     print(f'Pefrien local: http://127.0.0.1:{port}/',flush=True);server.serve_forever()
 if __name__=='__main__':
     p=argparse.ArgumentParser();p.add_argument('--port',type=int,default=8767);p.add_argument('--data');args=p.parse_args();serve(args.port,args.data)
