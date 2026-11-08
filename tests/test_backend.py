@@ -36,6 +36,17 @@ class BackendTests(unittest.TestCase):
         for _ in range(5):
             with self.assertRaises(APIError):self.s.verify('13800000002',wrong)
         with self.assertRaises(APIError):self.s.verify('13800000002',r['developmentCode'])
+    def test_configured_test_phone_requires_explicit_local_mode(self):
+        s=Store(Path(self.temp.name)/'local-test.db',lambda:self.now,test_phone='13800000009')
+        with self.assertRaises(APIError):s.verify('13800000009','123456')
+        for blank in ['', '  ', None]:
+            with self.assertRaises(APIError):s.verify('13800000009',blank,allow_test_login=True)
+        uid,token=s.verify('13800000009','anything',allow_test_login=True)
+        self.assertEqual(s.session(token),uid)
+        uid2,_=s.verify('13800000009','1',allow_test_login=True)
+        self.assertEqual(uid,uid2)
+        with self.assertRaises(APIError):s.verify('13800000008','123456',allow_test_login=True)
+        with self.assertRaises(APIError):self.s.verify('13800000009','123456',allow_test_login=True)
     def test_profile_isolation_and_conflict(self):
         other,_=self.login('13800000002');self.assertEqual(self.s.profile(other)['family']['pets'],[])
         with self.assertRaises(APIError) as e:self.s.save_profile(self.user,{'family':self.f,'revision':0})
